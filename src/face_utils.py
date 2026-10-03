@@ -3,6 +3,7 @@ from __future__ import annotations
 import os
 import sys
 import tempfile
+import urllib.request
 from pathlib import Path
 from typing import Any, List, Optional
 
@@ -10,6 +11,9 @@ import cv2
 import numpy as np
 
 from src.database import fetch_known_students
+
+
+CASCADE_URL = "https://raw.githubusercontent.com/opencv/opencv/master/data/haarcascades/haarcascade_frontalface_default.xml"
 
 
 def _find_haarcascade_xml() -> Optional[str]:
@@ -24,41 +28,50 @@ def _find_haarcascade_xml() -> Optional[str]:
         if base:
             roots.append(Path(base))
 
+    project_root = Path(__file__).resolve().parents[1]
+    roots.append(project_root)
+
     for root in roots:
         for candidate in [
             root / "Lib" / "site-packages" / "cv2" / "data" / "haarcascades",
+            root / "Lib" / "site-packages" / "cv2" / "data",
             root / "Lib" / "site-packages" / "opencv" / "data" / "haarcascades",
             root / "lib" / "python" / "site-packages" / "cv2" / "data" / "haarcascades",
             root / "lib" / "python3" / "site-packages" / "cv2" / "data" / "haarcascades",
             root / "lib" / "site-packages" / "cv2" / "data" / "haarcascades",
             root / "lib" / "site-packages" / "opencv" / "data" / "haarcascades",
+            root / "data",
+            project_root / "data",
         ]:
             for name in names:
                 path = candidate / name
                 if path.exists():
                     return str(path)
 
-    for root in [Path(__file__).resolve().parents[1], Path(sys.executable).resolve().parent.parent]:
-        if root.exists():
-            for pattern in [
-                "**/haarcascade_frontalface_default.xml",
-                "**/haarcascade_frontalface_alt.xml",
-                "**/haarcascade_frontalface_alt2.xml",
-            ]:
-                matches = sorted(root.glob(pattern))
-                if matches:
-                    return str(matches[0])
-
     return None
 
 
-def get_face_cascade() -> cv2.CascadeClassifier:
-    cascade_path = _find_haarcascade_xml()
-    if cascade_path is None:
-        raise RuntimeError(
-            "OpenCV face cascade file was not found. Reinstall opencv-python-headless or opencv-python so the Haar cascade XML is available."
-        )
+def ensure_local_face_cascade() -> str:
+    data_dir = Path(__file__).resolve().parents[1] / "data"
+    data_dir.mkdir(exist_ok=True)
+    local_file = data_dir / "haarcascade_frontalface_default.xml"
 
+    if not local_file.exists():
+        try:
+            with urllib.request.urlopen(CASCADE_URL, timeout=20) as response:
+                xml_bytes = response.read()
+            local_file.write_bytes(xml_bytes)
+        except Exception as exc:
+            raise RuntimeError(
+                "OpenCV face cascade file was not found and could not be downloaded automatically. "
+                f"Please install opencv-python or verify internet access. Details: {exc}"
+            ) from exc
+
+    return str(local_file)
+
+
+def get_face_cascade() -> cv2.CascadeClassifier:
+    cascade_path = _find_haarcascade_xml() or ensure_local_face_cascade()
     cascade = cv2.CascadeClassifier(cascade_path)
     if cascade.empty():
         raise RuntimeError(f"OpenCV failed to load the face cascade file: {cascade_path}")
