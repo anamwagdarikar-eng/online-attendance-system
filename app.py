@@ -12,14 +12,23 @@ import pandas as pd
 import streamlit as st
 
 PROJECT_ROOT = Path(__file__).resolve().parent
-if str(PROJECT_ROOT) not in sys.path:
-    sys.path.insert(0, str(PROJECT_ROOT))
-PARENT_DIR = PROJECT_ROOT.parent
-if str(PARENT_DIR) not in sys.path:
-    sys.path.insert(0, str(PARENT_DIR))
+for candidate in (PROJECT_ROOT, PROJECT_ROOT.parent):
+    if candidate and str(candidate) not in sys.path:
+        sys.path.insert(0, str(candidate))
 
-from src.database import fetch_recent_attendance, init_db, insert_attendance_record
-from src.face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
+try:
+    from src.database import fetch_recent_attendance, init_db, insert_attendance_record
+    from src.face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
+except ModuleNotFoundError:
+    if (PROJECT_ROOT / "database.py").exists() and (PROJECT_ROOT / "face_utils.py").exists():
+        from database import fetch_recent_attendance, init_db, insert_attendance_record
+        from face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
+    else:
+        src_dir = PROJECT_ROOT / "src"
+        if src_dir.exists() and str(src_dir) not in sys.path:
+            sys.path.insert(0, str(src_dir))
+        from database import fetch_recent_attendance, init_db, insert_attendance_record
+        from face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
 
 st.set_page_config(page_title="Online Attendance System", layout="wide")
 
@@ -77,7 +86,10 @@ with registration_tab:
                     temp_path = temp_file.name
 
                 embedding = ensure_single_face(temp_path)
-                from src.database import save_student
+                try:
+                    from src.database import save_student
+                except ModuleNotFoundError:
+                    from database import save_student
 
                 saved_id = save_student(
                     student_id=student_id,
