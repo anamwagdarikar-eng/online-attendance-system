@@ -12,17 +12,26 @@ from src.config import DATABASE_URL
 @contextmanager
 def get_connection() -> Iterator[psycopg.Connection[Any]]:
     conn = psycopg.connect(DATABASE_URL, autocommit=False)
-    register_vector(conn)
     try:
+        register_vector(conn)
         yield conn
     finally:
         conn.close()
 
 
-def init_db() -> None:
-    sql = """
-    CREATE EXTENSION IF NOT EXISTS vector;
+def ensure_vector_extension() -> None:
+    conn = psycopg.connect(DATABASE_URL, autocommit=True)
+    try:
+        with conn.cursor() as cur:
+            cur.execute("CREATE EXTENSION IF NOT EXISTS vector;")
+    finally:
+        conn.close()
 
+
+def init_db() -> None:
+    ensure_vector_extension()
+
+    sql = """
     CREATE TABLE IF NOT EXISTS students (
         id SERIAL PRIMARY KEY,
         student_id VARCHAR(50) UNIQUE NOT NULL,
