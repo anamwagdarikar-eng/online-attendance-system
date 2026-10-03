@@ -1,7 +1,9 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+from pathlib import Path
 from typing import Any, List, Optional
 
 import cv2
@@ -10,7 +12,57 @@ import numpy as np
 from src.database import fetch_known_students
 
 
-FACE_CASCADE = cv2.CascadeClassifier(cv2.data.haarcascades + "haarcascade_frontalface_default.xml")
+def _find_haarcascade_xml() -> Optional[str]:
+    names = [
+        "haarcascade_frontalface_default.xml",
+        "haarcascade_frontalface_alt.xml",
+        "haarcascade_frontalface_alt2.xml",
+    ]
+
+    roots = []
+    for base in [sys.prefix, sys.base_prefix]:
+        if base:
+            roots.append(Path(base))
+
+    for root in roots:
+        for candidate in [
+            root / "Lib" / "site-packages" / "cv2" / "data" / "haarcascades",
+            root / "Lib" / "site-packages" / "opencv" / "data" / "haarcascades",
+            root / "lib" / "python" / "site-packages" / "cv2" / "data" / "haarcascades",
+            root / "lib" / "python3" / "site-packages" / "cv2" / "data" / "haarcascades",
+            root / "lib" / "site-packages" / "cv2" / "data" / "haarcascades",
+            root / "lib" / "site-packages" / "opencv" / "data" / "haarcascades",
+        ]:
+            for name in names:
+                path = candidate / name
+                if path.exists():
+                    return str(path)
+
+    for root in [Path(__file__).resolve().parents[1], Path(sys.executable).resolve().parent.parent]:
+        if root.exists():
+            for pattern in [
+                "**/haarcascade_frontalface_default.xml",
+                "**/haarcascade_frontalface_alt.xml",
+                "**/haarcascade_frontalface_alt2.xml",
+            ]:
+                matches = sorted(root.glob(pattern))
+                if matches:
+                    return str(matches[0])
+
+    return None
+
+
+def get_face_cascade() -> cv2.CascadeClassifier:
+    cascade_path = _find_haarcascade_xml()
+    if cascade_path is None:
+        raise RuntimeError(
+            "OpenCV face cascade file was not found. Reinstall opencv-python-headless or opencv-python so the Haar cascade XML is available."
+        )
+
+    cascade = cv2.CascadeClassifier(cascade_path)
+    if cascade.empty():
+        raise RuntimeError(f"OpenCV failed to load the face cascade file: {cascade_path}")
+    return cascade
 
 
 def _descriptor_from_face(face_image: np.ndarray) -> np.ndarray:
@@ -26,8 +78,9 @@ def ensure_single_face(image_path: str) -> np.ndarray:
     if image is None:
         raise ValueError(f"Unable to read image: {image_path}")
 
+    cascade = get_face_cascade()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
 
     if len(faces) != 1:
         raise ValueError(
@@ -77,8 +130,9 @@ def find_best_match(face_embedding: np.ndarray, tolerance: float = 0.72) -> Opti
 
 
 def detect_and_match_faces(frame: np.ndarray, tolerance: float = 0.72) -> List[dict[str, Any]]:
+    cascade = get_face_cascade()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = FACE_CASCADE.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
     if len(faces) == 0:
         return []
 
