@@ -1,13 +1,22 @@
 from __future__ import annotations
 
 import os
+import sys
 import tempfile
+from pathlib import Path
 from typing import Any
 
 import cv2
 import numpy as np
 import pandas as pd
 import streamlit as st
+
+PROJECT_ROOT = Path(__file__).resolve().parent
+if str(PROJECT_ROOT) not in sys.path:
+    sys.path.insert(0, str(PROJECT_ROOT))
+PARENT_DIR = PROJECT_ROOT.parent
+if str(PARENT_DIR) not in sys.path:
+    sys.path.insert(0, str(PARENT_DIR))
 
 from src.database import fetch_recent_attendance, init_db, insert_attendance_record
 from src.face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
