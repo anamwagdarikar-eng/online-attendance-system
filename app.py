@@ -5,7 +5,6 @@ import tempfile
 from typing import Any
 
 import cv2
-import face_recognition
 import numpy as np
 import pandas as pd
 import streamlit as st
