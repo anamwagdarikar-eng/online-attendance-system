@@ -65,9 +65,11 @@ with registration_tab:
     uploaded_photo = st.file_uploader("Upload a front-facing student photo", type=["jpg", "jpeg", "png"])
 
     if uploaded_photo is not None:
+        uploaded_photo.seek(0)
         temp_path = save_uploaded_file(uploaded_photo)
         try:
             encoding = ensure_single_face(temp_path)
+            uploaded_photo.seek(0)
             st.image(uploaded_photo, caption="Uploaded student photo")
             st.success(f"Face encoded successfully: {len(encoding)} features detected")
         except Exception as exc:
@@ -81,8 +83,10 @@ with registration_tab:
             st.error("Please provide a student ID, full name, and a photo.")
         else:
             try:
+                uploaded_photo.seek(0)
+                file_bytes = uploaded_photo.getvalue()
                 with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-                    temp_file.write(uploaded_photo.read())
+                    temp_file.write(file_bytes)
                     temp_path = temp_file.name
 
                 embedding = ensure_single_face(temp_path)
@@ -106,7 +110,7 @@ with registration_tab:
             except Exception as exc:
                 st.error(f"Registration failed: {exc}")
             finally:
-                if os.path.exists(temp_path):
+                if 'temp_path' in locals() and os.path.exists(temp_path):
                     os.remove(temp_path)
 
 with attendance_tab:
@@ -124,7 +128,7 @@ with attendance_tab:
 
         attempts = []
         if idx is not None:
-            attempts = [str(idx)] + [str(i) for i in range(0, 5) if i != idx]
+            attempts = [str(idx)] + [str(i) for i in range(0, 6) if i != idx]
         else:
             attempts = [candidate]
 
@@ -134,6 +138,19 @@ with attendance_tab:
                 return cap
             cap.release()
         return None
+
+    if st.button("Test camera"):
+        cap = open_camera_candidate(source.strip())
+        if cap is None:
+            st.warning("No camera was detected. Check the webcam connection or use an RTSP URL / uploaded image.")
+        else:
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                st.success("Camera is working and a frame was captured successfully.")
+                st.image(frame, channels="BGR", caption="Live camera preview")
+            else:
+                st.warning("Camera is present but no frame was readable. Check permission, driver, or the RTSP stream.")
 
     if st.button("Scan class now"):
         if uploaded_class_image is not None:
