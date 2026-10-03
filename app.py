@@ -114,41 +114,99 @@ with attendance_tab:
     source = st.text_input("Camera index or CCTV RTSP URL", value="0")
     class_name = st.text_input("Attendance class name", value="CS-101")
     tolerance = st.slider("Face match tolerance", min_value=0.25, max_value=0.6, value=0.45, step=0.01)
+    uploaded_class_image = st.file_uploader("Or upload a classroom image", type=["jpg", "jpeg", "png"])
+
+    def open_camera_candidate(candidate: str):
+        try:
+            idx = int(candidate)
+        except ValueError:
+            idx = None
+
+        attempts = []
+        if idx is not None:
+            attempts = [str(idx)] + [str(i) for i in range(0, 5) if i != idx]
+        else:
+            attempts = [candidate]
+
+        for attempt in attempts:
+            cap = cv2.VideoCapture(attempt)
+            if cap.isOpened():
+                return cap
+            cap.release()
+        return None
 
     if st.button("Scan class now"):
-        cap = cv2.VideoCapture(source)
-        if not cap.isOpened():
-            st.error("Unable to open camera source. Try a different index or RTSP URL.")
-        else:
-            ret, frame = cap.read()
-            cap.release()
-            if not ret or frame is None:
-                st.error("No frame could be read from the camera.")
-            else:
-                recognized = detect_and_match_faces(frame, tolerance=tolerance)
-                if not recognized:
-                    st.warning("No registered faces were found in the captured frame.")
+        if uploaded_class_image is not None:
+            temp_path = save_uploaded_file(uploaded_class_image)
+            try:
+                frame = cv2.imread(temp_path)
+                if frame is None:
+                    st.error("Could not read the uploaded class image.")
                 else:
-                    for match in recognized:
-                        insert_attendance_record(
-                            student_id=match["student_id"],
-                            student_name=match["full_name"],
-                            class_name=class_name,
-                            confidence=match["confidence"],
-                            source="camera",
-                        )
-                        st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
+                    recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                    if not recognized:
+                        st.warning("No registered faces were found in the uploaded class image.")
+                    else:
+                        for match in recognized:
+                            insert_attendance_record(
+                                student_id=match["student_id"],
+                                student_name=match["full_name"],
+                                class_name=class_name,
+                                confidence=match["confidence"],
+                                source="image_upload",
+                            )
+                            st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
 
-                processed = annotated_frame(frame, recognized)
-                st.image(processed, channels="BGR", caption="Captured classroom frame with detected students")
+                    processed = annotated_frame(frame, recognized)
+                    st.image(processed, channels="BGR", caption="Uploaded classroom image with detected students")
 
-                if recognized:
-                    rows = [{
-                        "Student ID": item["student_id"],
-                        "Name": item["full_name"],
-                        "Confidence": round(item["confidence"], 3),
-                    } for item in recognized]
-                    st.dataframe(rows)
+                    if recognized:
+                        rows = [{
+                            "Student ID": item["student_id"],
+                            "Name": item["full_name"],
+                            "Confidence": round(item["confidence"], 3),
+                        } for item in recognized]
+                        st.dataframe(rows)
+            finally:
+                if os.path.exists(temp_path):
+                    os.remove(temp_path)
+        else:
+            cap = open_camera_candidate(source.strip())
+            if cap is None:
+                st.error(
+                    "No camera was found for this source. This usually means the machine has no webcam connected, or the RTSP stream is invalid. "
+                    "Use a local camera index like 0, a valid RTSP URL, or upload a classroom image instead."
+                )
+            else:
+                ret, frame = cap.read()
+                cap.release()
+                if not ret or frame is None:
+                    st.error("The camera opened but no frame could be read. Check the device, permission, or RTSP stream.")
+                else:
+                    recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                    if not recognized:
+                        st.warning("No registered faces were found in the captured frame.")
+                    else:
+                        for match in recognized:
+                            insert_attendance_record(
+                                student_id=match["student_id"],
+                                student_name=match["full_name"],
+                                class_name=class_name,
+                                confidence=match["confidence"],
+                                source="camera",
+                            )
+                            st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
+
+                    processed = annotated_frame(frame, recognized)
+                    st.image(processed, channels="BGR", caption="Captured classroom frame with detected students")
+
+                    if recognized:
+                        rows = [{
+                            "Student ID": item["student_id"],
+                            "Name": item["full_name"],
+                            "Confidence": round(item["confidence"], 3),
+                        } for item in recognized]
+                        st.dataframe(rows)
 
 with records_tab:
     st.subheader("3) Attendance log")
