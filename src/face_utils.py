@@ -78,6 +78,43 @@ def get_face_cascade() -> cv2.CascadeClassifier:
     return cascade
 
 
+def _detect_faces_in_gray(gray: np.ndarray) -> List[tuple[int, int, int, int]]:
+    cascade = get_face_cascade()
+
+    scales = [
+        (1.1, 5),
+        (1.15, 4),
+        (1.2, 4),
+        (1.3, 3),
+        (1.5, 3),
+    ]
+
+    for scale_factor, min_neighbors in scales:
+        faces = cascade.detectMultiScale(
+            gray,
+            scaleFactor=scale_factor,
+            minNeighbors=min_neighbors,
+            minSize=(40, 40),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+        if len(faces) > 0:
+            return [tuple(map(int, face)) for face in faces]
+
+    equalized = cv2.equalizeHist(gray)
+    for scale_factor, min_neighbors in scales:
+        faces = cascade.detectMultiScale(
+            equalized,
+            scaleFactor=scale_factor,
+            minNeighbors=min_neighbors,
+            minSize=(40, 40),
+            flags=cv2.CASCADE_SCALE_IMAGE,
+        )
+        if len(faces) > 0:
+            return [tuple(map(int, face)) for face in faces]
+
+    return []
+
+
 def _descriptor_from_face(face_image: np.ndarray) -> np.ndarray:
     gray = cv2.cvtColor(face_image, cv2.COLOR_BGR2GRAY)
     gray = cv2.resize(gray, (64, 64), interpolation=cv2.INTER_AREA)
@@ -91,14 +128,13 @@ def ensure_single_face(image_path: str) -> np.ndarray:
     if image is None:
         raise ValueError(f"Unable to read image: {image_path}")
 
-    cascade = get_face_cascade()
     gray = cv2.cvtColor(image, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(80, 80))
+    faces = _detect_faces_in_gray(gray)
 
     if len(faces) != 1:
         raise ValueError(
             f"Expected exactly one face in {image_path}, but found {len(faces)}. "
-            "Please use a single face photo for registration."
+            "Please upload a clear front-facing photo with only one person in the frame."
         )
 
     x, y, w, h = faces[0]
@@ -143,9 +179,8 @@ def find_best_match(face_embedding: np.ndarray, tolerance: float = 0.72) -> Opti
 
 
 def detect_and_match_faces(frame: np.ndarray, tolerance: float = 0.72) -> List[dict[str, Any]]:
-    cascade = get_face_cascade()
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
-    faces = cascade.detectMultiScale(gray, scaleFactor=1.1, minNeighbors=5, minSize=(60, 60))
+    faces = _detect_faces_in_gray(gray)
     if len(faces) == 0:
         return []
 

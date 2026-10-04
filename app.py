@@ -121,22 +121,49 @@ with attendance_tab:
     uploaded_class_image = st.file_uploader("Or upload a classroom image", type=["jpg", "jpeg", "png"])
 
     def open_camera_candidate(candidate: str):
-        try:
-            idx = int(candidate)
-        except ValueError:
-            idx = None
-
         attempts = []
-        if idx is not None:
-            attempts = [str(idx)] + [str(i) for i in range(0, 6) if i != idx]
-        else:
-            attempts = [candidate]
+        raw = candidate.strip()
+        if raw:
+            attempts.append(raw)
+
+        try:
+            idx = int(raw)
+            attempts.extend(str(i) for i in range(0, 10) if i != idx)
+        except ValueError:
+            pass
+
+        if not raw:
+            attempts.extend(str(i) for i in range(0, 10))
 
         for attempt in attempts:
-            cap = cv2.VideoCapture(attempt)
-            if cap.isOpened():
-                return cap
-            cap.release()
+            for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+                try:
+                    cap = cv2.VideoCapture(int(attempt), backend) if attempt.isdigit() else cv2.VideoCapture(attempt, backend)
+                except Exception:
+                    continue
+                if cap is not None and cap.isOpened():
+                    ret, _ = cap.read()
+                    if ret:
+                        return cap
+                    cap.release()
+                else:
+                    if cap is not None:
+                        cap.release()
+
+        if not attempts:
+            return None
+
+        for attempt in attempts:
+            try:
+                cap = cv2.VideoCapture(int(attempt)) if attempt.isdigit() else cv2.VideoCapture(attempt)
+            except Exception:
+                continue
+            if cap is not None and cap.isOpened():
+                ret, _ = cap.read()
+                if ret:
+                    return cap
+                cap.release()
+
         return None
 
     if st.button("Test camera"):
