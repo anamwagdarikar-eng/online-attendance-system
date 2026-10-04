@@ -183,17 +183,22 @@ with attendance_tab:
 
     browser_snapshot = st.camera_input("Use browser camera (recommended)")
 
+    def prepare_frame(frame: np.ndarray, max_dimension: int = 1200) -> np.ndarray:
+        height, width = frame.shape[:2]
+        scale = min(1.0, max_dimension / max(height, width))
+        if scale < 1.0:
+            frame = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
+        return frame
+
     if browser_snapshot is not None:
         try:
             file_bytes = browser_snapshot.getvalue()
-            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-                temp_file.write(file_bytes)
-                browser_path = temp_file.name
-
-            frame = cv2.imread(browser_path)
-            if frame is None:
+            image_array = np.frombuffer(file_bytes, dtype=np.uint8)
+            frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+            if frame is None or frame.size == 0:
                 st.error("The browser camera image could not be read.")
             else:
+                frame = prepare_frame(frame)
                 recognized = detect_and_match_faces(frame, tolerance=tolerance)
                 if not recognized:
                     st.warning("No registered faces were found in the browser camera image.")
@@ -220,9 +225,6 @@ with attendance_tab:
                     st.dataframe(rows)
         except Exception as exc:
             st.error(f"Browser camera processing failed: {exc}")
-        finally:
-            if 'browser_path' in locals() and os.path.exists(browser_path):
-                os.remove(browser_path)
 
     if st.button("Test camera"):
         cap = open_camera_candidate(source.strip())

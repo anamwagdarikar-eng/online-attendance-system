@@ -3,6 +3,7 @@ from __future__ import annotations
 from contextlib import contextmanager
 from typing import Any, Iterator, List, Optional
 
+import numpy as np
 import psycopg
 from pgvector.psycopg import register_vector
 
@@ -98,6 +99,20 @@ def save_student(
         return int(row[0])
 
 
+def _normalize_embedding(embedding: Any) -> List[float]:
+    if embedding is None:
+        return []
+
+    if hasattr(embedding, "to_list"):
+        values = embedding.to_list()
+    elif hasattr(embedding, "tolist"):
+        values = embedding.tolist()
+    else:
+        values = list(embedding)
+
+    return [float(value) for value in values]
+
+
 def fetch_known_students() -> List[dict[str, Any]]:
     with get_connection() as conn:
         with conn.cursor() as cur:
@@ -113,7 +128,7 @@ def fetch_known_students() -> List[dict[str, Any]]:
             "id": row[0],
             "student_id": student_id,
             "full_name": full_name,
-            "embedding": list(embedding),
+            "embedding": _normalize_embedding(embedding),
         })
     return students
 
