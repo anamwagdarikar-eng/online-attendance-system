@@ -179,13 +179,57 @@ with attendance_tab:
 
         return None
 
+    st.info("If the local OpenCV webcam is blocked, use the browser camera below. This bypasses Windows webcam permission and driver issues because the browser captures the camera directly.")
+
+    browser_snapshot = st.camera_input("Use browser camera (recommended)")
+
+    if browser_snapshot is not None:
+        try:
+            file_bytes = browser_snapshot.getvalue()
+            with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+                temp_file.write(file_bytes)
+                browser_path = temp_file.name
+
+            frame = cv2.imread(browser_path)
+            if frame is None:
+                st.error("The browser camera image could not be read.")
+            else:
+                recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                if not recognized:
+                    st.warning("No registered faces were found in the browser camera image.")
+                else:
+                    for match in recognized:
+                        insert_attendance_record(
+                            student_id=match["student_id"],
+                            student_name=match["full_name"],
+                            class_name=class_name,
+                            confidence=match["confidence"],
+                            source="browser_camera",
+                        )
+                        st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
+
+                processed = annotated_frame(frame, recognized)
+                st.image(processed, channels="BGR", caption="Browser camera snapshot with detected students")
+
+                if recognized:
+                    rows = [{
+                        "Student ID": item["student_id"],
+                        "Name": item["full_name"],
+                        "Confidence": round(item["confidence"], 3),
+                    } for item in recognized]
+                    st.dataframe(rows)
+        except Exception as exc:
+            st.error(f"Browser camera processing failed: {exc}")
+        finally:
+            if 'browser_path' in locals() and os.path.exists(browser_path):
+                os.remove(browser_path)
+
     if st.button("Test camera"):
         cap = open_camera_candidate(source.strip())
         if cap is None:
             st.warning(
-                "No camera was detected. On Windows, this usually means the webcam is not available to OpenCV. "
-                "Check Windows Camera Privacy, Device Manager, and that the webcam driver is installed. "
-                "You can also try changing the camera index or use a valid RTSP URL."
+                "No camera was detected by OpenCV. This usually means the webcam is blocked or unavailable to the local machine. "
+                "Use the browser camera above, which works even when OpenCV cannot access the device."
             )
         else:
             ret, frame = cap.read()
