@@ -121,24 +121,54 @@ with attendance_tab:
     uploaded_class_image = st.file_uploader("Or upload a classroom image", type=["jpg", "jpeg", "png"])
 
     def open_camera_candidate(candidate: str):
-        attempts = []
         raw = candidate.strip()
+        numeric_candidates = []
+
         if raw:
-            attempts.append(raw)
+            try:
+                numeric_candidates.append(int(raw))
+            except ValueError:
+                pass
 
-        try:
-            idx = int(raw)
-            attempts.extend(str(i) for i in range(0, 10) if i != idx)
-        except ValueError:
-            pass
+        numeric_candidates.extend(range(0, 10))
 
-        if not raw:
-            attempts.extend(str(i) for i in range(0, 10))
+        backend_list = [
+            cv2.CAP_DSHOW,
+            cv2.CAP_MSMF,
+            cv2.CAP_ANY,
+        ]
 
-        for attempt in attempts:
-            for backend in [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]:
+        seen = set()
+        for index in numeric_candidates:
+            for backend in backend_list:
+                key = (index, backend)
+                if key in seen:
+                    continue
+                seen.add(key)
                 try:
-                    cap = cv2.VideoCapture(int(attempt), backend) if attempt.isdigit() else cv2.VideoCapture(attempt, backend)
+                    cap = cv2.VideoCapture(index, backend)
+                except Exception:
+                    continue
+                if cap is None or not cap.isOpened():
+                    try:
+                        cap.release()
+                    except Exception:
+                        pass
+                    continue
+
+                ret, _ = cap.read()
+                if ret:
+                    return cap
+
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+
+        if raw and not raw.isdigit():
+            for backend in backend_list:
+                try:
+                    cap = cv2.VideoCapture(raw, backend)
                 except Exception:
                     continue
                 if cap is not None and cap.isOpened():
@@ -146,30 +176,17 @@ with attendance_tab:
                     if ret:
                         return cap
                     cap.release()
-                else:
-                    if cap is not None:
-                        cap.release()
-
-        if not attempts:
-            return None
-
-        for attempt in attempts:
-            try:
-                cap = cv2.VideoCapture(int(attempt)) if attempt.isdigit() else cv2.VideoCapture(attempt)
-            except Exception:
-                continue
-            if cap is not None and cap.isOpened():
-                ret, _ = cap.read()
-                if ret:
-                    return cap
-                cap.release()
 
         return None
 
     if st.button("Test camera"):
         cap = open_camera_candidate(source.strip())
         if cap is None:
-            st.warning("No camera was detected. Check the webcam connection or use an RTSP URL / uploaded image.")
+            st.warning(
+                "No camera was detected. On Windows, this usually means the webcam is not available to OpenCV. "
+                "Check Windows Camera Privacy, Device Manager, and that the webcam driver is installed. "
+                "You can also try changing the camera index or use a valid RTSP URL."
+            )
         else:
             ret, frame = cap.read()
             cap.release()
@@ -177,7 +194,7 @@ with attendance_tab:
                 st.success("Camera is working and a frame was captured successfully.")
                 st.image(frame, channels="BGR", caption="Live camera preview")
             else:
-                st.warning("Camera is present but no frame was readable. Check permission, driver, or the RTSP stream.")
+                st.warning("Camera is present but no frame was readable. Check permission, driver, or the stream URL.")
 
     if st.button("Scan class now"):
         if uploaded_class_image is not None:
