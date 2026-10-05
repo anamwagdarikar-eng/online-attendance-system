@@ -1,5 +1,6 @@
 from __future__ import annotations
 
+import io
 import os
 import sys
 import tempfile
@@ -11,24 +12,24 @@ import numpy as np
 import pandas as pd
 import streamlit as st
 
+try:
+    from reportlab.lib.pagesizes import letter
+    from reportlab.pdfgen import canvas
+except Exception:  # pragma: no cover
+    letter = None
+    canvas = None
+
 PROJECT_ROOT = Path(__file__).resolve().parent
 for candidate in (PROJECT_ROOT, PROJECT_ROOT.parent):
     if candidate and str(candidate) not in sys.path:
         sys.path.insert(0, str(candidate))
 
-try:
-    from src.database import fetch_recent_attendance, init_db, insert_attendance_record
-    from src.face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
-except ModuleNotFoundError:
-    if (PROJECT_ROOT / "database.py").exists() and (PROJECT_ROOT / "face_utils.py").exists():
-        from database import fetch_recent_attendance, init_db, insert_attendance_record
-        from face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
-    else:
-        src_dir = PROJECT_ROOT / "src"
-        if src_dir.exists() and str(src_dir) not in sys.path:
-            sys.path.insert(0, str(src_dir))
-        from database import fetch_recent_attendance, init_db, insert_attendance_record
-        from face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
+src_dir = PROJECT_ROOT / "src"
+if src_dir.exists() and str(src_dir) not in sys.path:
+    sys.path.insert(0, str(src_dir))
+
+from src.database import fetch_recent_attendance, init_db, insert_attendance_record
+from src.face_utils import annotated_frame, detect_and_match_faces, ensure_single_face, save_uploaded_file
 
 st.set_page_config(page_title="Online Attendance System", layout="wide")
 
@@ -37,6 +38,70 @@ st.set_page_config(page_title="Online Attendance System", layout="wide")
 def get_student_summary() -> pd.DataFrame:
     records = fetch_recent_attendance(limit=100)
     return pd.DataFrame(records)
+
+
+def enumerate_local_cameras(max_index: int = 10) -> list[int]:
+    backend_list = [cv2.CAP_DSHOW, cv2.CAP_MSMF, cv2.CAP_ANY]
+    detected: list[int] = []
+    seen: set[tuple[int, int]] = set()
+
+    for index in range(max_index):
+        for backend in backend_list:
+            key = (index, backend)
+            if key in seen:
+                continue
+            seen.add(key)
+            try:
+                cap = cv2.VideoCapture(index, backend)
+            except Exception:
+                continue
+            if cap is None or not cap.isOpened():
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                continue
+            try:
+                ok, _ = cap.read()
+            finally:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+            if ok:
+                detected.append(index)
+                break
+    return detected
+
+
+def render_attendance_pdf(df: pd.DataFrame) -> bytes:
+    if canvas is None:
+        raise RuntimeError("reportlab is not installed.")
+
+    buffer = io.BytesIO()
+    pdf = canvas.Canvas(buffer, pagesize=letter)
+    y = 760
+    pdf.setTitle("Attendance Record")
+    pdf.setFont("Helvetica-Bold", 16)
+    pdf.drawString(50, y, "Attendance Report")
+    y -= 24
+    pdf.setFont("Helvetica", 10)
+
+    if df.empty:
+        pdf.drawString(50, y, "No attendance records yet.")
+    else:
+        columns = ["student_id", "student_name", "class_name", "attendance_date", "attendance_time", "confidence", "source"]
+        visible_cols = [col for col in columns if col in df.columns]
+        for _, row in df.head(25).iterrows():
+            if y < 80:
+                pdf.showPage()
+                y = 760
+            values = [str(row.get(col, "")) for col in visible_cols]
+            pdf.drawString(50, y, " | ".join(values))
+            y -= 18
+
+    pdf.save()
+    return buffer.getvalue()
 
 
 st.title("Online Attendance System")
@@ -55,6 +120,7 @@ registration_tab, attendance_tab, records_tab = st.tabs(["Student Registration",
 
 with registration_tab:
     st.subheader("1) Register a student face")
+    st.info("Upload 5 to 6 photos of the same student from different angles, or capture them with the browser camera. This improves recognition accuracy during class scans.")
     student_id = st.text_input("Student ID")
     full_name = st.text_input("Full name")
     email = st.text_input("Email")
@@ -62,60 +128,80 @@ with registration_tab:
     program = st.text_input("Program")
     year_level = st.text_input("Year level")
     class_name = st.text_input("Class name")
-    uploaded_photo = st.file_uploader("Upload a front-facing student photo", type=["jpg", "jpeg", "png"])
 
-    if uploaded_photo is not None:
-        uploaded_photo.seek(0)
-        temp_path = save_uploaded_file(uploaded_photo)
-        try:
-            encoding = ensure_single_face(temp_path)
-            uploaded_photo.seek(0)
-            st.image(uploaded_photo, caption="Uploaded student photo")
-            st.success(f"Face encoded successfully: {len(encoding)} features detected")
-        except Exception as exc:
-            st.error(str(exc))
-        finally:
-            if os.path.exists(temp_path):
-                os.remove(temp_path)
+    uploaded_photos = st.file_uploader(
+        "Upload 5–6 student photos from different angles",
+        type=["jpg", "jpeg", "png"],
+        accept_multiple_files=True,
+    )
+    captured_photo = st.camera_input("Capture one angle with the browser camera")
+
+    selected_photos = []
+    if uploaded_photos:
+        selected_photos.extend(uploaded_photos)
+    if captured_photo is not None:
+        selected_photos.append(captured_photo)
+
+    if selected_photos:
+        st.caption(f"{len(selected_photos)} photo(s) selected for registration")
+        cols = st.columns(min(6, len(selected_photos)))
+        for idx, photo in enumerate(selected_photos[:6]):
+            with cols[idx % len(cols)]:
+                st.image(photo, caption=f"Angle {idx + 1}")
 
     if st.button("Register student"):
-        if not student_id or not full_name or uploaded_photo is None:
-            st.error("Please provide a student ID, full name, and a photo.")
+        if not student_id or not full_name:
+            st.error("Please provide a student ID and full name.")
+        elif len(selected_photos) < 5:
+            st.error("Please upload or capture at least 5 photos from different angles before registering.")
         else:
             try:
-                uploaded_photo.seek(0)
-                file_bytes = uploaded_photo.getvalue()
-                with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
-                    temp_file.write(file_bytes)
-                    temp_path = temp_file.name
-
-                embedding = ensure_single_face(temp_path)
+                descriptors = []
+                temp_paths = []
                 try:
+                    for photo in selected_photos[:6]:
+                        photo.seek(0)
+                        with tempfile.NamedTemporaryFile(delete=False, suffix=".jpg") as temp_file:
+                            temp_file.write(photo.getvalue())
+                            temp_path = temp_file.name
+                        temp_paths.append(temp_path)
+                        descriptors.append(ensure_single_face(temp_path))
+
+                    if not descriptors:
+                        raise ValueError("No valid face descriptors were generated from the uploaded photos.")
+
+                    embedding_array = np.vstack(descriptors)
+                    average_embedding = np.mean(embedding_array, axis=0)
                     from src.database import save_student
-                except ModuleNotFoundError:
-                    from database import save_student
 
-                saved_id = save_student(
-                    student_id=student_id,
-                    full_name=full_name,
-                    email=email or None,
-                    department=department or None,
-                    program=program or None,
-                    year_level=year_level or None,
-                    photo_path=temp_path,
-                    embedding=embedding.tolist(),
-                )
-
-                st.success(f"Student {full_name} registered successfully with ID {saved_id}.")
+                    saved_id = save_student(
+                        student_id=student_id,
+                        full_name=full_name,
+                        email=email or None,
+                        department=department or None,
+                        program=program or None,
+                        year_level=year_level or None,
+                        photo_path=temp_paths[0],
+                        embedding=average_embedding.astype(float).tolist(),
+                    )
+                    st.success(f"Student {full_name} registered successfully with ID {saved_id} using {len(descriptors)} angle photos.")
+                finally:
+                    for temp_path in temp_paths:
+                        if os.path.exists(temp_path):
+                            os.remove(temp_path)
             except Exception as exc:
                 st.error(f"Registration failed: {exc}")
-            finally:
-                if 'temp_path' in locals() and os.path.exists(temp_path):
-                    os.remove(temp_path)
 
 with attendance_tab:
     st.subheader("2) Scan the entire class")
-    source = st.text_input("Camera index or CCTV RTSP URL", value="0")
+    detected_local_cameras = enumerate_local_cameras()
+    if detected_local_cameras:
+        st.caption(f"Detected OpenCV local cameras: {detected_local_cameras}")
+        default_source = str(detected_local_cameras[0])
+    else:
+        default_source = "0"
+
+    source = st.text_input("Camera index or CCTV RTSP URL", value=default_source)
     class_name = st.text_input("Attendance class name", value="CS-101")
     tolerance = st.slider("Face match tolerance", min_value=0.25, max_value=0.6, value=0.45, step=0.01)
     uploaded_class_image = st.file_uploader("Or upload a classroom image", type=["jpg", "jpeg", "png"])
@@ -179,7 +265,7 @@ with attendance_tab:
 
         return None
 
-    st.info("If the local OpenCV webcam is blocked, use the browser camera below. This bypasses Windows webcam permission and driver issues because the browser captures the camera directly.")
+    st.info("OpenCV can only access a device when the OS exposes it to the Python process. If your laptop webcam or phone camera is not visible to OpenCV, use the browser camera below; it works from the browser and is the most reliable fallback.")
 
     browser_snapshot = st.camera_input("Use browser camera (recommended)")
 
@@ -200,19 +286,9 @@ with attendance_tab:
             else:
                 frame = prepare_frame(frame)
                 recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                st.session_state["last_recognized"] = recognized
                 if not recognized:
                     st.warning("No registered faces were found in the browser camera image.")
-                else:
-                    for match in recognized:
-                        insert_attendance_record(
-                            student_id=match["student_id"],
-                            student_name=match["full_name"],
-                            class_name=class_name,
-                            confidence=match["confidence"],
-                            source="browser_camera",
-                        )
-                        st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
-
                 processed = annotated_frame(frame, recognized)
                 st.image(processed, channels="BGR", caption="Browser camera snapshot with detected students")
 
@@ -223,6 +299,16 @@ with attendance_tab:
                         "Confidence": round(item["confidence"], 3),
                     } for item in recognized]
                     st.dataframe(rows)
+                    if st.button("Submit attendance", key="submit_browser"):
+                        for match in recognized:
+                            insert_attendance_record(
+                                student_id=match["student_id"],
+                                student_name=match["full_name"],
+                                class_name=class_name,
+                                confidence=match["confidence"],
+                                source="browser_camera",
+                            )
+                        st.success(f"Submitted attendance for {len(recognized)} detected student(s).")
         except Exception as exc:
             st.error(f"Browser camera processing failed: {exc}")
 
@@ -230,8 +316,8 @@ with attendance_tab:
         cap = open_camera_candidate(source.strip())
         if cap is None:
             st.warning(
-                "No camera was detected by OpenCV. This usually means the webcam is blocked or unavailable to the local machine. "
-                "Use the browser camera above, which works even when OpenCV cannot access the device."
+                "No local camera was detected by OpenCV. This usually means the webcam is blocked or unavailable to the machine, not that the hardware is missing. "
+                "Use the browser camera above for a reliable fallback."
             )
         else:
             ret, frame = cap.read()
@@ -251,19 +337,9 @@ with attendance_tab:
                     st.error("Could not read the uploaded class image.")
                 else:
                     recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                    st.session_state["last_recognized"] = recognized
                     if not recognized:
                         st.warning("No registered faces were found in the uploaded class image.")
-                    else:
-                        for match in recognized:
-                            insert_attendance_record(
-                                student_id=match["student_id"],
-                                student_name=match["full_name"],
-                                class_name=class_name,
-                                confidence=match["confidence"],
-                                source="image_upload",
-                            )
-                            st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
-
                     processed = annotated_frame(frame, recognized)
                     st.image(processed, channels="BGR", caption="Uploaded classroom image with detected students")
 
@@ -274,6 +350,16 @@ with attendance_tab:
                             "Confidence": round(item["confidence"], 3),
                         } for item in recognized]
                         st.dataframe(rows)
+                        if st.button("Submit attendance", key="submit_upload"):
+                            for match in recognized:
+                                insert_attendance_record(
+                                    student_id=match["student_id"],
+                                    student_name=match["full_name"],
+                                    class_name=class_name,
+                                    confidence=match["confidence"],
+                                    source="image_upload",
+                                )
+                            st.success(f"Submitted attendance for {len(recognized)} detected student(s).")
             finally:
                 if os.path.exists(temp_path):
                     os.remove(temp_path)
@@ -290,20 +376,11 @@ with attendance_tab:
                 if not ret or frame is None:
                     st.error("The camera opened but no frame could be read. Check the device, permission, or RTSP stream.")
                 else:
+                    frame = prepare_frame(frame)
                     recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                    st.session_state["last_recognized"] = recognized
                     if not recognized:
                         st.warning("No registered faces were found in the captured frame.")
-                    else:
-                        for match in recognized:
-                            insert_attendance_record(
-                                student_id=match["student_id"],
-                                student_name=match["full_name"],
-                                class_name=class_name,
-                                confidence=match["confidence"],
-                                source="camera",
-                            )
-                            st.success(f"Marked attendance for {match['full_name']} ({match['student_id']})")
-
                     processed = annotated_frame(frame, recognized)
                     st.image(processed, channels="BGR", caption="Captured classroom frame with detected students")
 
@@ -314,6 +391,16 @@ with attendance_tab:
                             "Confidence": round(item["confidence"], 3),
                         } for item in recognized]
                         st.dataframe(rows)
+                        if st.button("Submit attendance", key="submit_camera"):
+                            for match in recognized:
+                                insert_attendance_record(
+                                    student_id=match["student_id"],
+                                    student_name=match["full_name"],
+                                    class_name=class_name,
+                                    confidence=match["confidence"],
+                                    source="camera",
+                                )
+                            st.success(f"Submitted attendance for {len(recognized)} detected student(s).")
 
 with records_tab:
     st.subheader("3) Attendance log")
@@ -321,4 +408,30 @@ with records_tab:
     if df.empty:
         st.info("No attendance records yet.")
     else:
-        st.dataframe(df, use_container_width=True)
+        st.dataframe(df, width="stretch")
+        excel_bytes = None
+        try:
+            excel_buffer = io.BytesIO()
+            df.to_excel(excel_buffer, index=False, engine="openpyxl")
+            excel_bytes = excel_buffer.getvalue()
+        except Exception as exc:
+            st.warning(f"Excel export is unavailable: {exc}")
+
+        if excel_bytes is not None:
+            st.download_button(
+                "Download attendance as Excel",
+                data=excel_bytes,
+                file_name="attendance.xlsx",
+                mime="application/vnd.openxmlformats-officedocument.spreadsheetml.sheet",
+            )
+
+        try:
+            pdf_bytes = render_attendance_pdf(df)
+            st.download_button(
+                "Download attendance as PDF",
+                data=pdf_bytes,
+                file_name="attendance.pdf",
+                mime="application/pdf",
+            )
+        except Exception as exc:
+            st.warning(f"PDF export is unavailable: {exc}")
