@@ -6,6 +6,7 @@ import sys
 import tempfile
 from pathlib import Path
 from typing import Any
+from urllib.parse import quote
 
 import cv2
 import numpy as np
@@ -104,6 +105,26 @@ def render_attendance_pdf(df: pd.DataFrame) -> bytes:
     return buffer.getvalue()
 
 
+def normalize_rtsp_url(candidate: str) -> str:
+    raw = candidate.strip()
+    if not raw.lower().startswith("rtsp://"):
+        return raw
+
+    scheme, rest = raw.split("://", 1)
+    last_at = rest.rfind("@")
+    if last_at <= 0:
+        return raw
+
+    auth_part = rest[:last_at]
+    host_part = rest[last_at + 1 :]
+    if ":" not in auth_part:
+        return raw
+
+    username, password = auth_part.split(":", 1)
+    password = quote(password, safe="")
+    return f"{scheme}://{username}:{password}@{host_part}"
+
+
 st.title("Online Attendance System")
 st.caption("Face registration + classroom attendance scanning using Python, Streamlit, and PostgreSQL")
 
@@ -120,7 +141,7 @@ registration_tab, attendance_tab, records_tab = st.tabs(["Student Registration",
 
 with registration_tab:
     st.subheader("1) Register a student face")
-    st.info("Upload 5 to 6 photos of the same student from different angles, or capture them with the browser camera. This improves recognition accuracy during class scans.")
+    st.info("Use the six-step capture workflow below. Capture 5 to 6 clear photos from different angles for better recognition accuracy.")
     student_id = st.text_input("Student ID")
     full_name = st.text_input("Full name")
     email = st.text_input("Email")
@@ -130,30 +151,41 @@ with registration_tab:
     class_name = st.text_input("Class name")
 
     uploaded_photos = st.file_uploader(
-        "Upload 5–6 student photos from different angles",
+        "Optional: upload extra photos from different angles",
         type=["jpg", "jpeg", "png"],
         accept_multiple_files=True,
     )
-    captured_photo = st.camera_input("Capture one angle with the browser camera")
+
+    if "angle_captures" not in st.session_state:
+        st.session_state.angle_captures = {}
+
+    for angle in range(1, 7):
+        key = f"angle_{angle}"
+        photo = st.camera_input(f"Capture angle {angle}", key=key)
+        if photo is not None:
+            st.session_state.angle_captures[angle] = photo
+        if angle in st.session_state.angle_captures:
+            st.image(st.session_state.angle_captures[angle], caption=f"Angle {angle} captured", width=220)
 
     selected_photos = []
     if uploaded_photos:
         selected_photos.extend(uploaded_photos)
-    if captured_photo is not None:
-        selected_photos.append(captured_photo)
+    for angle in range(1, 7):
+        if angle in st.session_state.angle_captures:
+            selected_photos.append(st.session_state.angle_captures[angle])
 
     if selected_photos:
         st.caption(f"{len(selected_photos)} photo(s) selected for registration")
         cols = st.columns(min(6, len(selected_photos)))
         for idx, photo in enumerate(selected_photos[:6]):
             with cols[idx % len(cols)]:
-                st.image(photo, caption=f"Angle {idx + 1}")
+                st.image(photo, caption=f"Selected angle {idx + 1}")
 
     if st.button("Register student"):
         if not student_id or not full_name:
             st.error("Please provide a student ID and full name.")
         elif len(selected_photos) < 5:
-            st.error("Please upload or capture at least 5 photos from different angles before registering.")
+            st.error("Please capture or upload at least 5 photos from different angles before registering.")
         else:
             try:
                 descriptors = []
@@ -168,7 +200,7 @@ with registration_tab:
                         descriptors.append(ensure_single_face(temp_path))
 
                     if not descriptors:
-                        raise ValueError("No valid face descriptors were generated from the uploaded photos.")
+                        raise ValueError("No valid face descriptors were generated from the selected photos.")
 
                     embedding_array = np.vstack(descriptors)
                     average_embedding = np.mean(embedding_array, axis=0)
@@ -219,9 +251,9 @@ with attendance_tab:
         numeric_candidates.extend(range(0, 10))
 
         backend_list = [
+            cv2.CAP_ANY,
             cv2.CAP_DSHOW,
             cv2.CAP_MSMF,
-            cv2.CAP_ANY,
         ]
 
         seen = set()
@@ -241,27 +273,69 @@ with attendance_tab:
                     except Exception:
                         pass
                     continue
-
-                ret, _ = cap.read()
-                if ret:
-                    return cap
-
+                ret = False
                 try:
-                    cap.release()
-                except Exception:
-                    pass
-
-        if raw and not raw.isdigit():
-            for backend in backend_list:
-                try:
-                    cap = cv2.VideoCapture(raw, backend)
-                except Exception:
-                    continue
-                if cap is not None and cap.isOpened():
                     ret, _ = cap.read()
                     if ret:
                         return cap
-                    cap.release()
+                except Exception:
+                    continue
+                finally:
+                    if not ret:
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+
+        if raw and not raw.isdigit():
+            rtsp_candidate = normalize_rtsp_url(raw)
+            url_candidates = [rtsp_candidate]
+            if rtsp_candidate != raw:
+                url_candidates.insert(0, raw)
+            for raw_url in url_candidates:
+                for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
+                    try:
+                        cap = cv2.VideoCapture(raw_url, backend)
+                    except Exception:
+                        continue
+                    if cap is None or not cap.isOpened():
+                        try:
+                            cap.release()
+                        except Exception:
+                            pass
+                        continue
+                    ret = False
+                    try:
+                        ret, _ = cap.read()
+                        if ret:
+                            return cap
+                    except Exception:
+                        pass
+                    finally:
+                        if not ret:
+                            try:
+                                cap.release()
+                            except Exception:
+                                pass
+                if raw_url.lower().startswith("rtsp://"):
+                    try:
+                        cap = cv2.VideoCapture(raw_url)
+                        if cap is not None and cap.isOpened():
+                            ret = False
+                            try:
+                                ret, _ = cap.read()
+                                if ret:
+                                    return cap
+                            except Exception:
+                                pass
+                            finally:
+                                if not ret:
+                                    try:
+                                        cap.release()
+                                    except Exception:
+                                        pass
+                    except Exception:
+                        pass
 
         return None
 
