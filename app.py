@@ -125,6 +125,30 @@ def normalize_rtsp_url(candidate: str) -> str:
     return f"{scheme}://{username}:{password}@{host_part}"
 
 
+def try_open_rtsp_stream(url: str):
+    normalized = normalize_rtsp_url(url)
+    if not normalized:
+        return False, normalized, "RTSP URL is empty."
+
+    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
+        try:
+            cap = cv2.VideoCapture(normalized, backend)
+        except Exception:
+            continue
+        if cap is None or not cap.isOpened():
+            try:
+                cap.release()
+            except Exception:
+                pass
+            continue
+        ret, frame = cap.read()
+        cap.release()
+        if ret and frame is not None:
+            return True, normalized, "Stream opened successfully."
+
+    return False, normalized, "Failed to open stream. Check the IP, username, password, stream path, port 554, and network access."
+
+
 st.title("Online Attendance System")
 st.caption("Face registration + classroom attendance scanning using Python, Streamlit, and PostgreSQL")
 
@@ -351,40 +375,44 @@ with attendance_tab:
         return frame
 
     if browser_snapshot is not None:
-        try:
-            file_bytes = browser_snapshot.getvalue()
-            image_array = np.frombuffer(file_bytes, dtype=np.uint8)
-            frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
-            if frame is None or frame.size == 0:
-                st.error("The browser camera image could not be read.")
-            else:
-                frame = prepare_frame(frame)
-                recognized = detect_and_match_faces(frame, tolerance=tolerance)
-                st.session_state["last_recognized"] = recognized
-                if not recognized:
-                    st.warning("No registered faces were found in the browser camera image.")
-                processed = annotated_frame(frame, recognized)
-                st.image(processed, channels="BGR", caption="Browser camera snapshot with detected students")
+        current_browser_hash = hash(browser_snapshot.getvalue())
+        last_browser_hash = st.session_state.get("last_browser_hash")
+        if current_browser_hash != last_browser_hash:
+            try:
+                file_bytes = browser_snapshot.getvalue()
+                image_array = np.frombuffer(file_bytes, dtype=np.uint8)
+                frame = cv2.imdecode(image_array, cv2.IMREAD_COLOR)
+                if frame is None or frame.size == 0:
+                    st.error("The browser camera image could not be read.")
+                else:
+                    frame = prepare_frame(frame)
+                    recognized = detect_and_match_faces(frame, tolerance=tolerance)
+                    st.session_state["last_recognized"] = recognized
+                    st.session_state["last_browser_hash"] = current_browser_hash
+                    if not recognized:
+                        st.warning("No registered faces were found in the browser camera image.")
+                    processed = annotated_frame(frame, recognized)
+                    st.image(processed, channels="BGR", caption="Browser camera snapshot with detected students")
 
-                if recognized:
-                    rows = [{
-                        "Student ID": item["student_id"],
-                        "Name": item["full_name"],
-                        "Confidence": round(item["confidence"], 3),
-                    } for item in recognized]
-                    st.dataframe(rows)
-                    if st.button("Submit attendance", key="submit_browser"):
-                        for match in recognized:
-                            insert_attendance_record(
-                                student_id=match["student_id"],
-                                student_name=match["full_name"],
-                                class_name=class_name,
-                                confidence=match["confidence"],
-                                source="browser_camera",
-                            )
-                        st.success(f"Submitted attendance for {len(recognized)} detected student(s).")
-        except Exception as exc:
-            st.error(f"Browser camera processing failed: {exc}")
+                    if recognized:
+                        rows = [{
+                            "Student ID": item["student_id"],
+                            "Name": item["full_name"],
+                            "Confidence": round(item["confidence"], 3),
+                        } for item in recognized]
+                        st.dataframe(rows)
+                        if st.button("Submit attendance", key="submit_browser"):
+                            for match in recognized:
+                                insert_attendance_record(
+                                    student_id=match["student_id"],
+                                    student_name=match["full_name"],
+                                    class_name=class_name,
+                                    confidence=match["confidence"],
+                                    source="browser_camera",
+                                )
+                            st.success(f"Submitted attendance for {len(recognized)} detected student(s).")
+            except Exception as exc:
+                st.error(f"Browser camera processing failed: {exc}")
 
     if st.button("Test camera"):
         cap = open_camera_candidate(source.strip())
@@ -401,6 +429,18 @@ with attendance_tab:
                 st.image(frame, channels="BGR", caption="Live camera preview")
             else:
                 st.warning("Camera is present but no frame was readable. Check permission, driver, or the stream URL.")
+
+    if st.button("Check CCTV stream"):
+        url_to_test = source.strip()
+        if not url_to_test:
+            st.warning("Please enter a CCTV RTSP URL first.")
+        else:
+            ok, exact_url, message = try_open_rtsp_stream(url_to_test)
+            st.code(exact_url)
+            if ok:
+                st.success(f"CCTV stream opened successfully: {message}")
+            else:
+                st.error(f"CCTV stream failed: {message}")
 
     if st.button("Scan class now"):
         if uploaded_class_image is not None:
