@@ -4,9 +4,10 @@ import io
 import os
 import sys
 import tempfile
+import time
 from pathlib import Path
 from typing import Any
-from urllib.parse import quote
+from urllib.parse import quote, urlsplit, urlunsplit
 
 import cv2
 import numpy as np
@@ -110,43 +111,91 @@ def normalize_rtsp_url(candidate: str) -> str:
     if not raw.lower().startswith("rtsp://"):
         return raw
 
-    scheme, rest = raw.split("://", 1)
-    last_at = rest.rfind("@")
-    if last_at <= 0:
+    try:
+        parsed = urlsplit(raw)
+    except ValueError:
         return raw
 
-    auth_part = rest[:last_at]
-    host_part = rest[last_at + 1 :]
-    if ":" not in auth_part:
+    if not parsed.hostname:
         return raw
 
-    username, password = auth_part.split(":", 1)
-    password = quote(password, safe="")
-    return f"{scheme}://{username}:{password}@{host_part}"
+    username = parsed.username or ""
+    password = parsed.password or ""
+    if not username and not password:
+        return raw
+
+    userinfo = quote(username, safe="")
+    if password:
+        userinfo = f"{userinfo}:{quote(password, safe='')}"
+
+    host_port = parsed.hostname
+    if parsed.port:
+        host_port = f"{host_port}:{parsed.port}"
+
+    rebuilt = urlunsplit((parsed.scheme, f"{userinfo}@{host_port}", parsed.path, parsed.query, parsed.fragment))
+    if not rebuilt:
+        return raw
+
+    query = parsed.query
+    if query:
+        parts = [part for part in query.split("&") if part]
+        if not any(part.lower() == "tcp" or part.lower().startswith("tcp=") for part in parts):
+            rebuilt = f"{rebuilt}&tcp"
+    else:
+        rebuilt = f"{rebuilt}?tcp"
+
+    return rebuilt
+
+
+def build_rtsp_url_candidates(candidate: str) -> list[str]:
+    raw = candidate.strip()
+    if not raw.lower().startswith("rtsp://"):
+        return [raw]
+
+    normalized = normalize_rtsp_url(raw)
+    candidates = [raw, normalized]
+    seen = set()
+    ordered: list[str] = []
+    for url in candidates:
+        if not url:
+            continue
+        if url not in seen:
+            seen.add(url)
+            ordered.append(url)
+        if "tcp" not in url.lower():
+            if "?" in url:
+                tcp_url = f"{url}&tcp"
+            else:
+                tcp_url = f"{url}?tcp"
+            if tcp_url not in seen:
+                seen.add(tcp_url)
+                ordered.append(tcp_url)
+    return ordered
 
 
 def try_open_rtsp_stream(url: str):
-    normalized = normalize_rtsp_url(url)
-    if not normalized:
-        return False, normalized, "RTSP URL is empty."
+    candidates = build_rtsp_url_candidates(url)
+    if not candidates or not candidates[0]:
+        return False, candidates[0] if candidates else "", "RTSP URL is empty."
 
-    for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
-        try:
-            cap = cv2.VideoCapture(normalized, backend)
-        except Exception:
-            continue
-        if cap is None or not cap.isOpened():
+    for candidate in candidates:
+        for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
             try:
-                cap.release()
+                cap = cv2.VideoCapture(candidate, backend)
             except Exception:
-                pass
-            continue
-        ret, frame = cap.read()
-        cap.release()
-        if ret and frame is not None:
-            return True, normalized, "Stream opened successfully."
+                continue
+            if cap is None or not cap.isOpened():
+                try:
+                    cap.release()
+                except Exception:
+                    pass
+                continue
+            ret, frame = cap.read()
+            cap.release()
+            if ret and frame is not None:
+                return True, candidate, "Stream opened successfully."
 
-    return False, normalized, "Failed to open stream. Check the IP, username, password, stream path, port 554, and network access."
+    return False, candidates[0], "Failed to open stream. Check the IP, username, password, stream path, port 554, and network access."
 
 
 st.title("Online Attendance System")
@@ -312,11 +361,7 @@ with attendance_tab:
                             pass
 
         if raw and not raw.isdigit():
-            rtsp_candidate = normalize_rtsp_url(raw)
-            url_candidates = [rtsp_candidate]
-            if rtsp_candidate != raw:
-                url_candidates.insert(0, raw)
-            for raw_url in url_candidates:
+            for raw_url in build_rtsp_url_candidates(raw):
                 for backend in [cv2.CAP_FFMPEG, cv2.CAP_ANY]:
                     try:
                         cap = cv2.VideoCapture(raw_url, backend)
@@ -374,6 +419,30 @@ with attendance_tab:
             frame = cv2.resize(frame, (int(width * scale), int(height * scale)), interpolation=cv2.INTER_AREA)
         return frame
 
+    def render_live_preview(cap: cv2.VideoCapture, title: str = "Live preview", duration_seconds: float = 8.0) -> bool:
+        if cap is None or not cap.isOpened():
+            return False
+
+        placeholder = st.empty()
+        deadline = time.monotonic() + duration_seconds
+        frames_shown = 0
+        while cap.isOpened() and time.monotonic() < deadline:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                time.sleep(0.05)
+                continue
+            frame = prepare_frame(frame)
+            placeholder.image(frame, channels="BGR", caption=title)
+            frames_shown += 1
+            if frames_shown >= 20:
+                break
+
+        try:
+            cap.release()
+        except Exception:
+            pass
+        return True
+
     if browser_snapshot is not None:
         current_browser_hash = hash(browser_snapshot.getvalue())
         last_browser_hash = st.session_state.get("last_browser_hash")
@@ -423,11 +492,15 @@ with attendance_tab:
             )
         else:
             ret, frame = cap.read()
-            cap.release()
             if ret and frame is not None:
                 st.success("Camera is working and a frame was captured successfully.")
-                st.image(frame, channels="BGR", caption="Live camera preview")
+                st.caption("Live camera preview")
+                render_live_preview(cap, title="Live camera preview", duration_seconds=8.0)
             else:
+                try:
+                    cap.release()
+                except Exception:
+                    pass
                 st.warning("Camera is present but no frame was readable. Check permission, driver, or the stream URL.")
 
     if st.button("Check CCTV stream"):
@@ -439,6 +512,10 @@ with attendance_tab:
             st.code(exact_url)
             if ok:
                 st.success(f"CCTV stream opened successfully: {message}")
+                preview_cap = open_camera_candidate(url_to_test)
+                if preview_cap is not None:
+                    st.caption("Live RTSP preview")
+                    render_live_preview(preview_cap, title="Live RTSP preview", duration_seconds=8.0)
             else:
                 st.error(f"CCTV stream failed: {message}")
 
